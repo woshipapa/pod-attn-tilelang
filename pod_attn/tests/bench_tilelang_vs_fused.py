@@ -46,16 +46,23 @@ def main():
     parser.add_argument("--rtol", type=float, default=3e-2)
     parser.add_argument("--print-plan", action="store_true")
     parser.add_argument("--compile-tilelang-first", action="store_true")
+    parser.add_argument(
+        "--tilelang-only",
+        action="store_true",
+        help="Only run TileLang benchmark (useful when fused CUDA extension is unavailable).",
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for this benchmark.")
 
-    if not hasattr(pod_attn, "true_fused_attn_with_kvcache"):
-        raise RuntimeError(
-            "pod_attn.true_fused_attn_with_kvcache is unavailable. "
-            "Build/install fused_attn extension first."
+    fused_available = hasattr(pod_attn, "true_fused_attn_with_kvcache")
+    if (not fused_available) and (not args.tilelang_only):
+        print(
+            "warning: pod_attn.true_fused_attn_with_kvcache is unavailable; "
+            "switching to --tilelang-only mode."
         )
+        args.tilelang_only = True
 
     device = torch.device("cuda")
     dtype = torch.float16
@@ -127,28 +134,54 @@ def main():
             warmup_compile=False,
         )
 
+    fused_ms = None
+    fused_out_p = None
+    fused_out_d = None
     t0 = time.time()
-    fused_ms, (fused_out_p, fused_out_d) = _bench_cuda(run_fused_cuda, warmup=args.warmup, iters=args.iters)
+    if not args.tilelang_only:
+        fused_ms, (fused_out_p, fused_out_d) = _bench_cuda(run_fused_cuda, warmup=args.warmup, iters=args.iters)
     t1 = time.time()
     tilelang_ms, (tile_out_p, tile_out_d) = _bench_cuda(run_tilelang, warmup=args.warmup, iters=args.iters)
     t2 = time.time()
 
-    if not args.no_check:
+    if args.tilelang_only:
+        print("correctness: SKIPPED (--tilelang-only)")
+    elif not args.no_check:
         torch.testing.assert_close(tile_out_p, fused_out_p, atol=args.atol, rtol=args.rtol)
         torch.testing.assert_close(tile_out_d, fused_out_d, atol=args.atol, rtol=args.rtol)
         print(f"correctness: PASS (atol={args.atol}, rtol={args.rtol})")
     else:
-        print("correctness: SKIPPED")
+        print("correctness: SKIPPED (--no-check)")
 
+    sec = tilelang_ms / 1000.0
+    prefill_tokens = args.batch_p * args.seq_q_p
+    decode_tokens = args.batch_d * args.seq_q_d
+    total_tokens = prefill_tokens + decode_tokens
+    prefill_toks_s = prefill_tokens / sec
+    decode_toks_s = decode_tokens / sec
+    total_toks_s = total_tokens / sec
+
+    print("config")
+    print(
+        f"  batch_p={args.batch_p} seq_q_p={args.seq_q_p} seq_kv_p={args.seq_kv_p} "
+        f"batch_d={args.batch_d} seq_q_d={args.seq_q_d} seq_kv_d={args.seq_kv_d} "
+        f"heads={args.heads} dim={args.dim} fused_params={args.fused_params}"
+    )
     print("benchmark_result_ms")
-    print(f"  fused_cuda={fused_ms:.4f}")
+    if fused_ms is not None:
+        print(f"  fused_cuda={fused_ms:.4f}")
     print(f"  tilelang={tilelang_ms:.4f}")
-    print(f"  speedup_tilelang_vs_fused={fused_ms / tilelang_ms:.4f}x")
+    if fused_ms is not None:
+        print(f"  speedup_tilelang_vs_fused={fused_ms / tilelang_ms:.4f}x")
+    print("throughput_tokens_per_s")
+    print(f"  prefill={prefill_toks_s:.2f}")
+    print(f"  decode={decode_toks_s:.2f}")
+    print(f"  total={total_toks_s:.2f}")
     print("timing_wall_s")
-    print(f"  fused_cuda_total={t1 - t0:.2f}")
+    if fused_ms is not None:
+        print(f"  fused_cuda_total={t1 - t0:.2f}")
     print(f"  tilelang_total={t2 - t1:.2f}")
 
 
 if __name__ == "__main__":
     main()
-
