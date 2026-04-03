@@ -506,7 +506,9 @@ def _build_fused_kernel(
                                     T.reduce_sum(acc_sp, scores_sum_p, dim=1)
                                     for i in T.Parallel(block_m_p):
                                         logsum_p[i] = logsum_p[i] * scores_scale_p[i] + scores_sum_p[i]
-                                    T.copy(acc_sp, acc_sp_cast)
+                                    for ii in T.serial(block_m_p):
+                                        for jj in T.serial(block_n_p):
+                                            acc_sp_cast[ii, jj] = T.cast(acc_sp[ii, jj], dtype)
                                     for i, j in T.Parallel(block_m_p, dim):
                                         acc_op[i, j] *= scores_scale_p[i]
                                     T.gemm(acc_sp_cast, Vp_shared, acc_op, policy=T.GemmWarpPolicy.FullRow)
@@ -572,7 +574,9 @@ def _build_fused_kernel(
                                     T.reduce_sum(acc_sd, scores_sum_d, dim=1)
                                     for i in T.Parallel(block_m_d):
                                         logsum_d[i] = logsum_d[i] * scores_scale_d[i] + scores_sum_d[i]
-                                    T.copy(acc_sd, acc_sd_cast)
+                                    for ii in T.serial(block_m_d):
+                                        for jj in T.serial(block_n_d):
+                                            acc_sd_cast[ii, jj] = T.cast(acc_sd[ii, jj], dtype)
                                     for i, j in T.Parallel(block_m_d, dim):
                                         acc_od[i, j] *= scores_scale_d[i]
                                     T.gemm(acc_sd_cast, Vd_shared, acc_od, policy=T.GemmWarpPolicy.FullRow)
