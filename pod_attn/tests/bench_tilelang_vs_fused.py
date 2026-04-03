@@ -47,6 +47,16 @@ def main():
     parser.add_argument("--print-plan", action="store_true")
     parser.add_argument("--compile-tilelang-first", action="store_true")
     parser.add_argument(
+        "--print-scheduler-stats",
+        action="store_true",
+        help="Print TileLang fused scheduler statistics (prefill/decode cursor and slot counters summary).",
+    )
+    parser.add_argument(
+        "--print-scheduler-slot-counters",
+        action="store_true",
+        help="Print full per-slot scheduler counters (requires --print-scheduler-stats).",
+    )
+    parser.add_argument(
         "--tilelang-only",
         action="store_true",
         help="Only run TileLang benchmark (useful when fused CUDA extension is unavailable).",
@@ -181,6 +191,27 @@ def main():
     if fused_ms is not None:
         print(f"  fused_cuda_total={t1 - t0:.2f}")
     print(f"  tilelang_total={t2 - t1:.2f}")
+
+    if args.print_scheduler_stats:
+        _, _, sched_stats = true_fused_attn_with_kvcache_tilelang(
+            q_p=q_p,
+            k_cache_p=k_p,
+            v_cache_p=v_p,
+            q_d=q_d,
+            k_cache_d=k_d,
+            v_cache_d=v_d,
+            cache_seqlens_p=None,
+            cache_seqlens_d=None,
+            causal=args.causal_prefill,
+            fused_params=args.fused_params,
+            warmup_compile=False,
+            return_scheduler_stats=True,
+            print_scheduler_stats=False,
+            return_scheduler_slot_counters=args.print_scheduler_slot_counters,
+        )
+        print("tilelang_scheduler_stats_from_bench")
+        for k in sorted(sched_stats.keys()):
+            print(f"  {k}={sched_stats[k]}")
 
 
 if __name__ == "__main__":

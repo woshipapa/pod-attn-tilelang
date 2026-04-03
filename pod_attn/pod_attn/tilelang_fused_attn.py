@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 
@@ -233,6 +233,82 @@ def get_tilelang_fused_launch_plan(
         "decode_blocks": decode_blocks,
         "scheduler_counters": sm_count + 2,
     }
+
+
+def _summarize_scheduler_state(
+    sched_state: torch.Tensor,
+    plan: Dict[str, Any],
+    include_slot_counters: bool = False,
+) -> Dict[str, Any]:
+    sm_count = int(plan["sm_count"])
+    expected_numel = sm_count + 2
+    state_cpu = sched_state.detach().to(device="cpu", dtype=torch.int64)
+    if int(state_cpu.numel()) != expected_numel:
+        raise ValueError(
+            f"unexpected sched_state size: got {state_cpu.numel()}, expected {expected_numel}"
+        )
+
+    slot_counters = state_cpu[:sm_count]
+    prefill_cursor = int(state_cpu[sm_count].item())
+    decode_cursor = int(state_cpu[sm_count + 1].item())
+    prefill_slots = int(plan["prefill_blocks"])
+    decode_slots = int(plan["decode_blocks"])
+    total_slots = prefill_slots + decode_slots
+
+    stats: Dict[str, Any] = {
+        "sm_count": sm_count,
+        "fused_op_selected": int(plan["fused_op_selected"]),
+        "num_splits_p": int(plan["num_splits_p"]),
+        "num_splits_d": int(plan["num_splits_d"]),
+        "prefill_slots_expected": prefill_slots,
+        "decode_slots_expected": decode_slots,
+        "prefill_cursor_final": prefill_cursor,
+        "decode_cursor_final": decode_cursor,
+        "prefill_done": prefill_cursor >= prefill_slots,
+        "decode_done": decode_cursor >= decode_slots,
+        "total_slots_expected": total_slots,
+        "total_slots_issued": prefill_cursor + decode_cursor,
+        "slot_counter_min": int(slot_counters.min().item()) if sm_count > 0 else 0,
+        "slot_counter_max": int(slot_counters.max().item()) if sm_count > 0 else 0,
+        "slot_counter_mean": float(slot_counters.float().mean().item()) if sm_count > 0 else 0.0,
+        "slot_counter_nonzero": int((slot_counters > 0).sum().item()) if sm_count > 0 else 0,
+    }
+    if include_slot_counters:
+        stats["slot_counters"] = [int(v) for v in slot_counters.tolist()]
+    return stats
+
+
+def _print_scheduler_stats(stats: Dict[str, Any]) -> None:
+    print("tilelang_scheduler_stats")
+    print(
+        "  "
+        f"sm_count={stats['sm_count']} "
+        f"fused_op_selected={stats['fused_op_selected']} "
+        f"splits_p={stats['num_splits_p']} "
+        f"splits_d={stats['num_splits_d']}"
+    )
+    print(
+        "  "
+        f"prefill_cursor={stats['prefill_cursor_final']}/{stats['prefill_slots_expected']} "
+        f"done={stats['prefill_done']}"
+    )
+    print(
+        "  "
+        f"decode_cursor={stats['decode_cursor_final']}/{stats['decode_slots_expected']} "
+        f"done={stats['decode_done']}"
+    )
+    print(
+        "  "
+        f"total_issued={stats['total_slots_issued']}/{stats['total_slots_expected']}"
+    )
+    print(
+        "  "
+        f"slot_counter[min/mean/max]={stats['slot_counter_min']}/"
+        f"{stats['slot_counter_mean']:.2f}/{stats['slot_counter_max']} "
+        f"nonzero={stats['slot_counter_nonzero']}/{stats['sm_count']}"
+    )
+    if "slot_counters" in stats:
+        print(f"  slot_counters={stats['slot_counters']}")
 
 
 def _parse_cache_seqlens(
@@ -678,7 +754,10 @@ def true_fused_attn_with_kvcache_tilelang(
     return_softmax_lse: bool = False,
     fused_params: int = 15,
     warmup_compile: bool = False,
-) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+    return_scheduler_stats: bool = False,
+    print_scheduler_stats: bool = False,
+    return_scheduler_slot_counters: bool = False,
+) -> tuple:
     _require_tilelang()
     _validate_inputs(q_p, k_cache_p, v_cache_p, q_d, k_cache_d, v_cache_d)
 
@@ -768,8 +847,23 @@ def true_fused_attn_with_kvcache_tilelang(
     part_d = torch.empty((batch_d, heads, splits_d, seq_q_d, dim), dtype=torch.float32, device=q_d.device)
 
     out_p, out_d = kernel(q_p, k_cache_p, v_cache_p, q_d, k_cache_d, v_cache_d, sched_state, lse_p, part_p, lse_d, part_d)
+    scheduler_stats = None
+    if return_scheduler_stats or print_scheduler_stats:
+        torch.cuda.synchronize(device=q_p.device)
+        scheduler_stats = _summarize_scheduler_state(
+            sched_state=sched_state,
+            plan=plan,
+            include_slot_counters=return_scheduler_slot_counters,
+        )
+        if print_scheduler_stats:
+            _print_scheduler_stats(scheduler_stats)
+
     if return_softmax_lse:
+        if return_scheduler_stats:
+            return out_p, out_d, lse_p, lse_d, scheduler_stats
         return out_p, out_d, lse_p, lse_d
+    if return_scheduler_stats:
+        return out_p, out_d, scheduler_stats
     return out_p, out_d
 
 
