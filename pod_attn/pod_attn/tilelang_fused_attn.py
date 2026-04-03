@@ -396,11 +396,10 @@ def _build_fused_kernel(
 
                 for _ in T.serial(total_rounds):
                     if tx == 0:
-                        done_shared[0] = T.if_then_else(
-                            (SchedState[sm_num + 0] >= prefill_slots) & (SchedState[sm_num + 1] >= decode_slots),
-                            1,
-                            0,
-                        )
+                        if (SchedState[sm_num + 0] >= prefill_slots) and (SchedState[sm_num + 1] >= decode_slots):
+                            done_shared[0] = 1
+                        else:
+                            done_shared[0] = 0
                         valid_shared[0] = 0
                         op_shared[0] = 0
                         linear_id_shared[0] = 0
@@ -413,24 +412,27 @@ def _build_fused_kernel(
                                 elif decode_slots == 0:
                                     op_shared[0] = 0
                                 elif fused_op & 1:
+                                    sched_tag = T.atomic_add(SchedState[sm_slot], 1, return_prev=True)
                                     if prefill_slots <= decode_slots:
                                         total_tags = decode_slots // prefill_slots + 1
-                                        op_shared[0] = T.if_then_else(
-                                            T.atomic_add(SchedState[sm_slot], 1, return_prev=True) % total_tags == 0,
-                                            0,
-                                            1,
-                                        )
+                                        if sched_tag % total_tags == 0:
+                                            op_shared[0] = 0
+                                        else:
+                                            op_shared[0] = 1
                                     else:
                                         pref_tags = prefill_slots // decode_slots
-                                        op_shared[0] = T.if_then_else(
-                                            T.atomic_add(SchedState[sm_slot], 1, return_prev=True) % (pref_tags + 1) < pref_tags,
-                                            0,
-                                            1,
-                                        )
+                                        if sched_tag % (pref_tags + 1) < pref_tags:
+                                            op_shared[0] = 0
+                                        else:
+                                            op_shared[0] = 1
                                 else:
-                                    op_shared[0] = T.atomic_add(SchedState[sm_slot], 1, return_prev=True) % 2
+                                    sched_tag = T.atomic_add(SchedState[sm_slot], 1, return_prev=True)
+                                    op_shared[0] = sched_tag % 2
 
-                                linear_id_shared[0] = T.atomic_add(SchedState[sm_num + op_shared[0]], 1, return_prev=True)
+                                if op_shared[0] == 0:
+                                    linear_id_shared[0] = T.atomic_add(SchedState[sm_num + 0], 1, return_prev=True)
+                                else:
+                                    linear_id_shared[0] = T.atomic_add(SchedState[sm_num + 1], 1, return_prev=True)
                                 if op_shared[0] == 0 and linear_id_shared[0] >= prefill_slots:
                                     op_shared[0] = 1
                                     linear_id_shared[0] = T.atomic_add(SchedState[sm_num + 1], 1, return_prev=True)
@@ -438,12 +440,12 @@ def _build_fused_kernel(
                                     op_shared[0] = 0
                                     linear_id_shared[0] = T.atomic_add(SchedState[sm_num + 0], 1, return_prev=True)
 
-                                valid_shared[0] = T.if_then_else(
-                                    ((op_shared[0] == 0) & (linear_id_shared[0] < prefill_slots))
-                                    | ((op_shared[0] == 1) & (linear_id_shared[0] < decode_slots)),
-                                    1,
-                                    0,
-                                )
+                                if (op_shared[0] == 0 and linear_id_shared[0] < prefill_slots) or (
+                                    op_shared[0] == 1 and linear_id_shared[0] < decode_slots
+                                ):
+                                    valid_shared[0] = 1
+                                else:
+                                    valid_shared[0] = 0
 
                     T.sync_threads()
                     if done_shared[0] == 0 and valid_shared[0] == 1 and op_shared[0] == 0:
