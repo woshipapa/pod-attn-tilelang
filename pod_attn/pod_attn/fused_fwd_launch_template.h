@@ -362,10 +362,10 @@ void run_true_fused_fwd(Flash_fwd_params &prefill_params, Flash_fwd_params &deco
 
     //fprintf(stderr, "p.b = %d, p.seqlen_q = %d, ", prefill_params.b, prefill_params.seqlen_q);
     //fprintf(stderr, "d.b = %d, d.seqlen_q = %d\n", decode_params.b, decode_params.seqlen_q);
-    
+    // seq 维度切成M块
     const int num_m_block_prefill = (prefill_params.seqlen_q + Kernel_traits_prefill::kBlockM - 1) / Kernel_traits_prefill::kBlockM;
     const int num_m_block_decode = (decode_params.seqlen_q + Kernel_traits_decode::kBlockM - 1) / Kernel_traits_decode::kBlockM;
-
+    // M块数量 * batch size * head num * split num得到算术逻辑块
     size_t num_blocks_prefill = (num_m_block_prefill * prefill_params.b * prefill_params.h * prefill_params.num_splits);
     size_t num_blocks_decode;
     if constexpr(DecodeIsSplit) {

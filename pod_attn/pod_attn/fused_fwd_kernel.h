@@ -1453,6 +1453,7 @@ inline __device__ void compute_fused_tb_attn(const Params &prefill_params, const
         const int decode_slots = (decode_blocks + blk_factor_d - 1) / blk_factor_d;
         
         if constexpr(FusedOp & 1) {
+            // 按照prefill 和 decode的计算block比例去分配
             if(prefill_slots <= decode_slots) {
                 // Total tags = (decode + prefill) / min(decode, prefill)
                 // = 1 + decode / prefill; when prefill < decode
@@ -1528,6 +1529,7 @@ inline __device__ void compute_fused_tb_attn(const Params &prefill_params, const
                 Has_alibi, Is_even_MN_p, Is_even_K_p, Is_softcap, PrefillIsSplit, false>
                 (prefill_params, bidb, bidh, m_block, n_split_idx, num_n_splits, tidx, smem_map);
         } else {
+            // 由里到外的三层循环
             const int m_block = (linear_block_id % num_mblocks_p);
             // The block index for the batch.
             const int bidb = (linear_block_id / num_mblocks_p) % prefill_params.b;
