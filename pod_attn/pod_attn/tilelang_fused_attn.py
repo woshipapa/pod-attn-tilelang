@@ -593,7 +593,7 @@ def _build_fused_kernel(
                 lse_logsum_local = T.alloc_var(accum_dtype)
                 lse_max_local = T.alloc_var(accum_dtype)
                 scale_local = T.alloc_var(accum_dtype)
-                for i in T.Parallel(block_m_p):
+                for i in T.serial(block_m_p):
                     q_idx = bx * block_m_p + i
                     if q_idx < seq_q_p:
                         lse_max_local = -T.infinity(accum_dtype)
@@ -621,7 +621,7 @@ def _build_fused_kernel(
                 lse_logsum_local = T.alloc_var(accum_dtype)
                 lse_max_local = T.alloc_var(accum_dtype)
                 scale_local = T.alloc_var(accum_dtype)
-                for i in T.Parallel(block_m_d):
+                for i in T.serial(block_m_d):
                     q_idx = bx * block_m_d + i
                     if q_idx < seq_q_d:
                         lse_max_local = -T.infinity(accum_dtype)
