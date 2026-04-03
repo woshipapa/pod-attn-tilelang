@@ -237,8 +237,10 @@ def get_tilelang_fused_launch_plan(
 
 def _summarize_scheduler_state(
     sched_state: torch.Tensor,
+    slot_task_counts: torch.Tensor,
     plan: Dict[str, Any],
     include_slot_counters: bool = False,
+    include_slot_task_counts: bool = False,
 ) -> Dict[str, Any]:
     sm_count = int(plan["sm_count"])
     expected_numel = sm_count + 2
@@ -254,6 +256,14 @@ def _summarize_scheduler_state(
     prefill_slots = int(plan["prefill_blocks"])
     decode_slots = int(plan["decode_blocks"])
     total_slots = prefill_slots + decode_slots
+    slot_task_counts_cpu = slot_task_counts.detach().to(device="cpu", dtype=torch.int64)
+    if tuple(slot_task_counts_cpu.shape) != (sm_count, 2):
+        raise ValueError(
+            f"unexpected slot_task_counts shape: got {tuple(slot_task_counts_cpu.shape)}, expected {(sm_count, 2)}"
+        )
+    slot_prefill_tasks = slot_task_counts_cpu[:, 0]
+    slot_decode_tasks = slot_task_counts_cpu[:, 1]
+    slot_total_tasks = slot_prefill_tasks + slot_decode_tasks
 
     stats: Dict[str, Any] = {
         "sm_count": sm_count,
@@ -272,9 +282,30 @@ def _summarize_scheduler_state(
         "slot_counter_max": int(slot_counters.max().item()) if sm_count > 0 else 0,
         "slot_counter_mean": float(slot_counters.float().mean().item()) if sm_count > 0 else 0.0,
         "slot_counter_nonzero": int((slot_counters > 0).sum().item()) if sm_count > 0 else 0,
+        "slot_prefill_tasks_total": int(slot_prefill_tasks.sum().item()) if sm_count > 0 else 0,
+        "slot_decode_tasks_total": int(slot_decode_tasks.sum().item()) if sm_count > 0 else 0,
+        "slot_tasks_total": int(slot_total_tasks.sum().item()) if sm_count > 0 else 0,
+        "slot_prefill_tasks_min": int(slot_prefill_tasks.min().item()) if sm_count > 0 else 0,
+        "slot_prefill_tasks_max": int(slot_prefill_tasks.max().item()) if sm_count > 0 else 0,
+        "slot_prefill_tasks_mean": float(slot_prefill_tasks.float().mean().item()) if sm_count > 0 else 0.0,
+        "slot_decode_tasks_min": int(slot_decode_tasks.min().item()) if sm_count > 0 else 0,
+        "slot_decode_tasks_max": int(slot_decode_tasks.max().item()) if sm_count > 0 else 0,
+        "slot_decode_tasks_mean": float(slot_decode_tasks.float().mean().item()) if sm_count > 0 else 0.0,
+        "slot_tasks_min": int(slot_total_tasks.min().item()) if sm_count > 0 else 0,
+        "slot_tasks_max": int(slot_total_tasks.max().item()) if sm_count > 0 else 0,
+        "slot_tasks_mean": float(slot_total_tasks.float().mean().item()) if sm_count > 0 else 0.0,
     }
+    stats["slot_prefill_tasks_gap"] = stats["prefill_slots_expected"] - stats["slot_prefill_tasks_total"]
+    stats["slot_decode_tasks_gap"] = stats["decode_slots_expected"] - stats["slot_decode_tasks_total"]
+    stats["slot_task_accounting_ok"] = (
+        stats["slot_prefill_tasks_gap"] == 0 and stats["slot_decode_tasks_gap"] == 0
+    )
     if include_slot_counters:
         stats["slot_counters"] = [int(v) for v in slot_counters.tolist()]
+    if include_slot_task_counts:
+        stats["slot_prefill_tasks"] = [int(v) for v in slot_prefill_tasks.tolist()]
+        stats["slot_decode_tasks"] = [int(v) for v in slot_decode_tasks.tolist()]
+        stats["slot_total_tasks"] = [int(v) for v in slot_total_tasks.tolist()]
     return stats
 
 
@@ -307,8 +338,38 @@ def _print_scheduler_stats(stats: Dict[str, Any]) -> None:
         f"{stats['slot_counter_mean']:.2f}/{stats['slot_counter_max']} "
         f"nonzero={stats['slot_counter_nonzero']}/{stats['sm_count']}"
     )
+    print(
+        "  "
+        f"slot_prefill_tasks[min/mean/max]={stats['slot_prefill_tasks_min']}/"
+        f"{stats['slot_prefill_tasks_mean']:.2f}/{stats['slot_prefill_tasks_max']} "
+        f"sum={stats['slot_prefill_tasks_total']}"
+    )
+    print(
+        "  "
+        f"slot_decode_tasks[min/mean/max]={stats['slot_decode_tasks_min']}/"
+        f"{stats['slot_decode_tasks_mean']:.2f}/{stats['slot_decode_tasks_max']} "
+        f"sum={stats['slot_decode_tasks_total']}"
+    )
+    print(
+        "  "
+        f"slot_total_tasks[min/mean/max]={stats['slot_tasks_min']}/"
+        f"{stats['slot_tasks_mean']:.2f}/{stats['slot_tasks_max']} "
+        f"sum={stats['slot_tasks_total']}"
+    )
+    print(
+        "  "
+        f"slot_task_accounting_ok={stats['slot_task_accounting_ok']} "
+        f"prefill_gap={stats['slot_prefill_tasks_gap']} "
+        f"decode_gap={stats['slot_decode_tasks_gap']}"
+    )
     if "slot_counters" in stats:
         print(f"  slot_counters={stats['slot_counters']}")
+    if "slot_prefill_tasks" in stats:
+        print(f"  slot_prefill_tasks={stats['slot_prefill_tasks']}")
+    if "slot_decode_tasks" in stats:
+        print(f"  slot_decode_tasks={stats['slot_decode_tasks']}")
+    if "slot_total_tasks" in stats:
+        print(f"  slot_total_tasks={stats['slot_total_tasks']}")
 
 
 def _parse_cache_seqlens(
@@ -406,7 +467,7 @@ def _build_fused_kernel(
     n_blocks_per_split_d = _ceildiv(total_n_blocks_d, num_splits_d)
 
     @tilelang.jit(
-        out_idx=[11, 12],
+        out_idx=[12, 13],
         pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
     )
     def _kernel():
@@ -422,6 +483,7 @@ def _build_fused_kernel(
             Kd: T.Tensor([batch_d, seq_kv_d, heads, dim], dtype),
             Vd: T.Tensor([batch_d, seq_kv_d, heads, dim], dtype),
             SchedState: T.Tensor([sm_num + 2], T.int32),
+            SlotTaskCount: T.Tensor([sm_num, 2], T.int32),
             LseP: T.Tensor([batch_p, heads, num_splits_p, seq_q_p], accum_dtype),
             PartP: T.Tensor([batch_p, heads, num_splits_p, seq_q_p, dim], accum_dtype),
             LseD: T.Tensor([batch_d, heads, num_splits_d, seq_q_d], accum_dtype),
@@ -523,6 +585,12 @@ def _build_fused_kernel(
                                 else:
                                     valid_shared[0] = 0
 
+                    T.sync_threads()
+                    if tx == 0 and done_shared[0] == 0 and valid_shared[0] == 1:
+                        if op_shared[0] == 0:
+                            SlotTaskCount[sm_slot, 0] = SlotTaskCount[sm_slot, 0] + 1
+                        else:
+                            SlotTaskCount[sm_slot, 1] = SlotTaskCount[sm_slot, 1] + 1
                     T.sync_threads()
                     if done_shared[0] == 0 and valid_shared[0] == 1 and op_shared[0] == 0:
                         p_linear = linear_id_shared[0]
@@ -757,6 +825,7 @@ def true_fused_attn_with_kvcache_tilelang(
     return_scheduler_stats: bool = False,
     print_scheduler_stats: bool = False,
     return_scheduler_slot_counters: bool = False,
+    return_scheduler_slot_task_counts: bool = False,
 ) -> tuple:
     _require_tilelang()
     _validate_inputs(q_p, k_cache_p, v_cache_p, q_d, k_cache_d, v_cache_d)
@@ -841,19 +910,35 @@ def true_fused_attn_with_kvcache_tilelang(
 
     sm_num = driver.get_num_sms()
     sched_state = torch.zeros((sm_num + 2,), dtype=torch.int32, device=q_p.device)
+    slot_task_count = torch.zeros((sm_num, 2), dtype=torch.int32, device=q_p.device)
     lse_p = torch.empty((batch_p, heads, splits_p, seq_q_p), dtype=torch.float32, device=q_p.device)
     part_p = torch.empty((batch_p, heads, splits_p, seq_q_p, dim), dtype=torch.float32, device=q_p.device)
     lse_d = torch.empty((batch_d, heads, splits_d, seq_q_d), dtype=torch.float32, device=q_d.device)
     part_d = torch.empty((batch_d, heads, splits_d, seq_q_d, dim), dtype=torch.float32, device=q_d.device)
 
-    out_p, out_d = kernel(q_p, k_cache_p, v_cache_p, q_d, k_cache_d, v_cache_d, sched_state, lse_p, part_p, lse_d, part_d)
+    out_p, out_d = kernel(
+        q_p,
+        k_cache_p,
+        v_cache_p,
+        q_d,
+        k_cache_d,
+        v_cache_d,
+        sched_state,
+        slot_task_count,
+        lse_p,
+        part_p,
+        lse_d,
+        part_d,
+    )
     scheduler_stats = None
     if return_scheduler_stats or print_scheduler_stats:
         torch.cuda.synchronize(device=q_p.device)
         scheduler_stats = _summarize_scheduler_state(
             sched_state=sched_state,
+            slot_task_counts=slot_task_count,
             plan=plan,
             include_slot_counters=return_scheduler_slot_counters,
+            include_slot_task_counts=return_scheduler_slot_task_counts,
         )
         if print_scheduler_stats:
             _print_scheduler_stats(scheduler_stats)

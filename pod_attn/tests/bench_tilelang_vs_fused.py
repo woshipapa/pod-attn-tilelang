@@ -57,6 +57,11 @@ def main():
         help="Print full per-slot scheduler counters (requires --print-scheduler-stats).",
     )
     parser.add_argument(
+        "--print-scheduler-slot-tasks",
+        action="store_true",
+        help="Print full per-slot valid task counts for prefill/decode (requires --print-scheduler-stats).",
+    )
+    parser.add_argument(
         "--tilelang-only",
         action="store_true",
         help="Only run TileLang benchmark (useful when fused CUDA extension is unavailable).",
@@ -208,6 +213,7 @@ def main():
             return_scheduler_stats=True,
             print_scheduler_stats=False,
             return_scheduler_slot_counters=args.print_scheduler_slot_counters,
+            return_scheduler_slot_task_counts=args.print_scheduler_slot_tasks,
         )
         print("tilelang_scheduler_stats_from_bench")
         for k in sorted(sched_stats.keys()):
