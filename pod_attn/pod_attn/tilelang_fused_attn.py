@@ -370,8 +370,8 @@ def _build_fused_kernel(
                 Qp_shared = T.alloc_shared([block_m_p, dim], dtype)
                 Kp_shared = T.alloc_shared([block_n_p, dim], dtype)
                 Vp_shared = T.alloc_shared([block_n_p, dim], dtype)
+                Pp_shared = T.alloc_shared([block_m_p, block_n_p], dtype)
                 acc_sp = T.alloc_fragment([block_m_p, block_n_p], accum_dtype)
-                acc_sp_cast = T.alloc_fragment([block_m_p, block_n_p], dtype)
                 acc_op = T.alloc_fragment([block_m_p, dim], accum_dtype)
                 scores_max_p = T.alloc_fragment([block_m_p], accum_dtype)
                 scores_max_prev_p = T.alloc_fragment([block_m_p], accum_dtype)
@@ -384,8 +384,8 @@ def _build_fused_kernel(
                 Qd_shared = T.alloc_shared([block_m_d, dim], dtype)
                 Kd_shared = T.alloc_shared([block_n_d, dim], dtype)
                 Vd_shared = T.alloc_shared([block_n_d, dim], dtype)
+                Pd_shared = T.alloc_shared([block_m_d, block_n_d], dtype)
                 acc_sd = T.alloc_fragment([block_m_d, block_n_d], accum_dtype)
-                acc_sd_cast = T.alloc_fragment([block_m_d, block_n_d], dtype)
                 acc_od = T.alloc_fragment([block_m_d, dim], accum_dtype)
                 scores_max_d = T.alloc_fragment([block_m_d], accum_dtype)
                 scores_max_prev_d = T.alloc_fragment([block_m_d], accum_dtype)
@@ -506,12 +506,10 @@ def _build_fused_kernel(
                                     T.reduce_sum(acc_sp, scores_sum_p, dim=1)
                                     for i in T.Parallel(block_m_p):
                                         logsum_p[i] = logsum_p[i] * scores_scale_p[i] + scores_sum_p[i]
-                                    for ii in T.serial(block_m_p):
-                                        for jj in T.serial(block_n_p):
-                                            acc_sp_cast[ii, jj] = T.cast(acc_sp[ii, jj], dtype)
+                                    T.copy(acc_sp, Pp_shared)
                                     for i, j in T.Parallel(block_m_p, dim):
                                         acc_op[i, j] *= scores_scale_p[i]
-                                    T.gemm(acc_sp_cast, Vp_shared, acc_op, policy=T.GemmWarpPolicy.FullRow)
+                                    T.gemm(Pp_shared, Vp_shared, acc_op, policy=T.GemmWarpPolicy.FullRow)
 
                         for i in T.Parallel(block_m_p):
                             q_idx = m_start + i
@@ -574,12 +572,10 @@ def _build_fused_kernel(
                                     T.reduce_sum(acc_sd, scores_sum_d, dim=1)
                                     for i in T.Parallel(block_m_d):
                                         logsum_d[i] = logsum_d[i] * scores_scale_d[i] + scores_sum_d[i]
-                                    for ii in T.serial(block_m_d):
-                                        for jj in T.serial(block_n_d):
-                                            acc_sd_cast[ii, jj] = T.cast(acc_sd[ii, jj], dtype)
+                                    T.copy(acc_sd, Pd_shared)
                                     for i, j in T.Parallel(block_m_d, dim):
                                         acc_od[i, j] *= scores_scale_d[i]
-                                    T.gemm(acc_sd_cast, Vd_shared, acc_od, policy=T.GemmWarpPolicy.FullRow)
+                                    T.gemm(Pd_shared, Vd_shared, acc_od, policy=T.GemmWarpPolicy.FullRow)
 
                         for i in T.Parallel(block_m_d):
                             q_idx = m_start + i
