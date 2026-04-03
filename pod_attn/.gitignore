@@ -1,0 +1,6 @@
+**/.eggs/
+**/build/
+**/dist/
+**/output/
+**/*.egg-info/
+**/graphs/
